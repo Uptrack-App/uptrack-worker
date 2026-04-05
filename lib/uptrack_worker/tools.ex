@@ -3,6 +3,24 @@ defmodule UptrackWorker.Tools do
 
   @timeout 15_000
 
+  @doc "Health check — called via :erpc from main app."
+  def health do
+    mem = :erlang.memory(:total)
+    procs = :erlang.system_info(:process_count)
+    monitors = Registry.count(UptrackWorker.Monitoring.MonitorRegistry)
+    region = Application.get_env(:uptrack_worker, :node_region, "unknown")
+
+    %{
+      status: "ok",
+      node: node(),
+      region: region,
+      monitors: monitors,
+      memory_mb: Float.round(mem / 1_048_576, 1),
+      beam_procs: procs,
+      uptime_seconds: :erlang.statistics(:wall_clock) |> elem(0) |> div(1000)
+    }
+  end
+
   @doc "One-time HTTP check. Returns {region, result}."
   def check_website(url) do
     region = Application.get_env(:uptrack_worker, :node_region, "unknown")
