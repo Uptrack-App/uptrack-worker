@@ -23,7 +23,7 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
   require Logger
 
   @check_client Application.compile_env(:uptrack_worker, :check_client, UptrackWorker.Monitoring.CheckClient.Gun)
-  @region Application.compile_env(:uptrack_worker, :node_region, :us)
+  defp region, do: Application.get_env(:uptrack_worker, :node_region, "us")
 
   @consensus_timeout_ms 10_000
 
@@ -80,7 +80,7 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
     jitter = :rand.uniform(max(state.interval_ms, 1000))
     schedule_check(jitter)
 
-    Logger.debug("MonitorProcess started: #{monitor.name} (#{monitor.id}) region=#{@region}")
+    Logger.debug("MonitorProcess started: #{monitor.name} (#{monitor.id}) region=#{region()}")
     {:ok, state}
   end
 
@@ -125,8 +125,8 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
   # --- Check result + consensus ---
 
   def handle_info({:check_result, result}, state) do
-    consensus = Consensus.add_result(state.consensus, @region, result)
-    broadcast_to_group(state.monitor_id, @region, result)
+    consensus = Consensus.add_result(state.consensus, region(), result)
+    broadcast_to_group(state.monitor_id, region(), result)
     consensus = maybe_start_timer(consensus)
 
     state = %{state | consensus: consensus, checking: false}
