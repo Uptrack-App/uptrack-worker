@@ -1,7 +1,7 @@
 import Config
 
 config :uptrack_worker,
-  node_region: :us,
+  node_region: "us",
   check_client: UptrackWorker.Monitoring.CheckClient.Gun
 
 config :logger, :console,
