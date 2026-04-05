@@ -2,7 +2,7 @@ import Config
 
 config :uptrack_worker,
   node_region: "us",
-  check_client: UptrackWorker.Monitoring.CheckClient.Gun
+  check_client: UptrackWorker.Monitoring.CheckClient.Mint
 
 config :logger, :console,
   format: "$time $metadata[$level] $message\n",

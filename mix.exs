@@ -25,6 +25,8 @@ defmodule UptrackWorker.MixProject do
   defp deps do
     [
       {:gun, "~> 2.1"},
+      {:mint, "~> 1.6"},
+      {:castore, "~> 1.0"},
       {:jason, "~> 1.2"},
       {:libcluster, "~> 3.4"}
     ]
