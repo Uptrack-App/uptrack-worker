@@ -5,24 +5,20 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
   Performs HTTP checks and broadcasts results via pg to all regions.
   Does NOT write to database or trigger alerts — that's the home node's job.
 
+  Checks use fresh connections per execution via CheckExecutor — no
+  persistent connections. This eliminates stale connection issues.
+
   ## Pipeline
 
       check → broadcast result to pg group → collect other regions → track consensus
-
-  ## Differences from main app MonitorProcess
-  - No DB writes (no record_result)
-  - No alert triggering (no maybe_trigger_alert)
-  - No Events broadcasting (no Phoenix.PubSub)
-  - Uses plain map for monitor (not Ecto schema)
   """
 
   use GenServer
 
-  alias UptrackWorker.Monitoring.{GunConnection, Consensus, MonitorRegistry}
+  alias UptrackWorker.Monitoring.{CheckExecutor, Consensus, MonitorRegistry}
 
   require Logger
 
-  @check_client Application.compile_env(:uptrack_worker, :check_client, UptrackWorker.Monitoring.CheckClient.Gun)
   defp region, do: Application.get_env(:uptrack_worker, :node_region, "us")
 
   @consensus_timeout_ms 10_000
@@ -31,7 +27,6 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
     :monitor_id,
     :monitor,
     :interval_ms,
-    :conn,
     :consecutive_failures,
     status: :active,
     checking: false,
@@ -56,13 +51,6 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
 
   @impl true
   def init(monitor) do
-    conn = case @check_client.open_connection(monitor) do
-      {:ok, c} -> c
-      {:error, reason} ->
-        Logger.error("MonitorProcess #{monitor.id}: connection failed: #{inspect(reason)}")
-        nil
-    end
-
     # Join pg group for cross-region result broadcasting
     :pg.join(:monitor_checks, monitor.id, self())
 
@@ -73,7 +61,6 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
       monitor: monitor,
       interval_ms: (monitor.interval || 30) * 1000,
       consecutive_failures: 0,
-      conn: conn,
       consensus: %Consensus{expected_regions: expected}
     }
 
@@ -97,38 +84,29 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
     {:noreply, state}
   end
 
+  # Fire check — fresh connection per check via CheckExecutor
   def handle_info(:check, %{status: :active, checking: false} = state) do
     schedule_check(state.interval_ms)
 
-    # Mint: run check synchronously (process-less, receives TCP in this process)
-    # Gun: run check async in Task (Gun owns its own process)
-    if mint_client?() do
-      {result, state} = do_check_sync(state)
-      send(self(), {:check_result, result})
-      {:noreply, state}
-    else
-      parent = self()
-      monitor = state.monitor
-      conn = state.conn
-      check_client = @check_client
+    parent = self()
+    monitor = state.monitor
 
-      Task.Supervisor.start_child(UptrackWorker.TaskSupervisor, fn ->
-        result = try do
-          check_client.check(monitor, conn)
-        rescue
-          e -> %{monitor_id: monitor.id, status: "down", response_time: 0,
-                 checked_at: DateTime.utc_now() |> DateTime.truncate(:second),
-                 error_message: "Check error: #{Exception.message(e)}"}
-        catch
-          kind, reason -> %{monitor_id: monitor.id, status: "down", response_time: 0,
-                            checked_at: DateTime.utc_now() |> DateTime.truncate(:second),
-                            error_message: "Check #{kind}: #{inspect(reason)}"}
-        end
-        send(parent, {:check_result, result})
-      end)
+    Task.Supervisor.start_child(UptrackWorker.TaskSupervisor, fn ->
+      result = try do
+        CheckExecutor.execute(monitor)
+      rescue
+        e -> %{monitor_id: monitor.id, status: "down", response_time: 0,
+               checked_at: DateTime.utc_now() |> DateTime.truncate(:second),
+               error_message: "Check error: #{Exception.message(e)}"}
+      catch
+        kind, reason -> %{monitor_id: monitor.id, status: "down", response_time: 0,
+                          checked_at: DateTime.utc_now() |> DateTime.truncate(:second),
+                          error_message: "Check #{kind}: #{inspect(reason)}"}
+      end
+      send(parent, {:check_result, result})
+    end)
 
-      {:noreply, %{state | checking: true}}
-    end
+    {:noreply, %{state | checking: true}}
   end
 
   # --- Check result + consensus ---
@@ -155,31 +133,8 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
     {:noreply, try_consensus(state)}
   end
 
-  # --- Gun lifecycle ---
-
-  def handle_info({:gun_up, _pid, _protocol}, state) do
-    {:noreply, %{state | conn: GunConnection.connected(state.conn)}}
-  end
-
-  def handle_info({:gun_down, _pid, _protocol, _reason, _}, state) do
-    {:noreply, %{state | conn: GunConnection.disconnected(state.conn)}}
-  end
-
-  def handle_info({:gun_error, _pid, _reason}, state), do: {:noreply, state}
-  def handle_info({:gun_error, _pid, _stream, _reason}, state), do: {:noreply, state}
-
-  def handle_info({:DOWN, ref, :process, _pid, reason}, %{conn: %GunConnection{ref: conn_ref}} = state)
-      when ref == conn_ref do
-    Logger.warning("MonitorProcess #{state.monitor_id}: Gun died: #{inspect(reason)}, reconnecting")
-    conn = case @check_client.open_connection(state.monitor) do
-      {:ok, c} -> c
-      {:error, _} -> nil
-    end
-    {:noreply, %{state | conn: conn}}
-  end
-
+  # Catch-all for unexpected messages (Task :DOWN, etc.)
   def handle_info({:DOWN, _ref, :process, _pid, _reason}, state), do: {:noreply, state}
-  def handle_info({:gun_data, _pid, _stream, _fin, _data}, state), do: {:noreply, state}
   def handle_info(_msg, state), do: {:noreply, state}
 
   # --- Config updates ---
@@ -196,9 +151,10 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
     {:stop, :normal, state}
   end
 
+  # --- Terminate ---
+
   @impl true
   def terminate(_reason, state) do
-    if state.conn, do: @check_client.close_connection(state.conn)
     cancel_consensus_timer(state.consensus)
     :ok
   end
@@ -254,40 +210,5 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
       members when is_list(members) -> max(length(members), 1)
       _ -> 1
     end
-  end
-
-  # --- Mint support ---
-
-  defp mint_client? do
-    @check_client == UptrackWorker.Monitoring.CheckClient.Mint
-  end
-
-  # Synchronous check for Mint (runs in GenServer process, ~100ms)
-  defp do_check_sync(state) do
-    result = try do
-      raw = @check_client.check(state.monitor, state.conn)
-      # Extract updated Mint connection from result
-      {updated_conn, clean_result} = pop_mint_conn(raw)
-      conn = updated_conn || state.conn
-      {clean_result, %{state | conn: conn}}
-    rescue
-      e ->
-        result = %{monitor_id: state.monitor.id, status: "down", response_time: 0,
-                   checked_at: DateTime.utc_now() |> DateTime.truncate(:second),
-                   error_message: "Check error: #{Exception.message(e)}"}
-        {result, state}
-    catch
-      kind, reason ->
-        result = %{monitor_id: state.monitor.id, status: "down", response_time: 0,
-                   checked_at: DateTime.utc_now() |> DateTime.truncate(:second),
-                   error_message: "Check #{kind}: #{inspect(reason)}"}
-        {result, state}
-    end
-
-    result
-  end
-
-  defp pop_mint_conn(result) when is_map(result) do
-    {Map.get(result, :__mint_conn__), Map.delete(result, :__mint_conn__)}
   end
 end
