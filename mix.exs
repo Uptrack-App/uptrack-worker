@@ -28,7 +28,8 @@ defmodule UptrackWorker.MixProject do
       {:mint, "~> 1.6"},
       {:castore, "~> 1.0"},
       {:jason, "~> 1.2"},
-      {:libcluster, "~> 3.4"}
+      {:libcluster, "~> 3.4"},
+      {:appsignal, "~> 2.0"}
     ]
   end
 end
