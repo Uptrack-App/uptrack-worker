@@ -1,141 +1,113 @@
 # Uptrack Worker — Infrastructure
 
+> Operator runbook. **Real hostnames, IPs, and provider details live in a private wiki / agenix-encrypted notes** — never in this public document.
+
 ## Cluster Overview
 
-Multi-region check consensus: 3 continents, 4 nodes, pg process groups.
+Multi-region check consensus across 4 nodes spanning 3 continents, coordinated via Erlang `:pg` process groups over a Tailscale (WireGuard) mesh.
 
-| Node | Role | Location | Tailscale IP | Specs |
-|------|------|----------|-------------|-------|
-| nbg1 | Main app (primary) | EU / Nuremberg | REMOVED_MAIN_TS_IP_1 | 4 CPU, 8GB |
-| nbg2 | Main app (standby) | EU / Nuremberg | REMOVED_MAIN_TS_IP_2 | 4 CPU, 8GB |
-| worker1-us-ashburn | Check worker | US / Virginia | 100.69.152.35 | 2 CPU, 2.5GB |
-| worker2-india | Check worker | Asia / Hyderabad | 100.96.28.118 | 3 ARM64, 18GB |
+| Node | Role | Region |
+|------|------|--------|
+| Main app (primary) | Phoenix API + coordinator | EU |
+| Main app (standby) | Phoenix API + coordinator | EU |
+| Check worker | Probe execution | US |
+| Check worker | Probe execution | Asia |
+
+Specs vary per provider; see private operator notes for current sizing.
 
 ## Erlang Distribution
 
 - **Mode**: Long names (`-name`, not `-sname`)
-- **Cookie**: `REMOVED_ERLANG_COOKIE`
-- **Cluster strategy**: libcluster Epmd (static node list)
+- **Cookie**: Set via `RELEASE_COOKIE` env var. Must be a strong random value (32+ chars) shared across all nodes. Never hardcode.
+- **Cluster strategy**: libcluster Epmd (static node list resolved at boot)
 - **Transport**: Tailscale mesh (WireGuard encrypted)
 
-### Node Names
+### Node naming convention
 
 ```
-uptrack@REMOVED_MAIN_TS_IP_1          # nbg1
-uptrack@REMOVED_MAIN_TS_IP_2          # nbg2
-uptrack_worker@100.69.152.35  # worker1-us-ashburn
-uptrack_worker@100.96.28.118  # worker2-india
+uptrack@<host>           # Main app (Phoenix API + coordinator)
+uptrack_worker@<host>    # Check worker
 ```
 
-## Worker Nodes
+The `uptrack@` vs `uptrack_worker@` prefix is load-bearing — it drives the `MonitorSupervisor.assigned_to_this_node?/1` partition that excludes worker nodes from app-side monitor ownership.
 
-### worker1-us-ashburn (RackNerd)
+## Worker provisioning
 
-- **Provider**: RackNerd KVM VPS ($28/yr Black Friday 2025)
-- **Public IP**: REMOVED_US_WORKER_IP
-- **OS**: NixOS 24.11 (x86_64)
-- **Specs**: 2 vCPU, 2.5GB RAM, 43GB disk
-- **SSH**: `ssh root@REMOVED_US_WORKER_IP`
-- **NerdVM Panel**: https://nerdvm.racknerd.com/ (REMOVED_PROVIDER_ACCOUNT)
-- **Renewal**: Nov 2026
+Workers are deployed on small VPS instances (one per region). Any provider works as long as:
 
-### worker2-india (Oracle Cloud)
+- The host can reach the main app via Tailscale
+- NixOS or another supported OS is installed
+- The `uptrack-worker` service can run as a non-root user
+- Outbound HTTP/HTTPS is unrestricted (workers probe arbitrary targets)
 
-- **Provider**: Oracle Cloud Free Tier (Always Free A1.Flex)
-- **Public IP**: REMOVED_ASIA_WORKER_IP
-- **OS**: NixOS 25.05 (aarch64)
-- **Specs**: 3 OCPU ARM64, 18GB RAM
-- **SSH**: `ssh root@REMOVED_ASIA_WORKER_IP`
-- **Region**: Hyderabad (ap-hyderabad-1)
+Region assignment via `NODE_REGION` env var (`us`, `asia`, `eu`, ...).
 
 ## Deployment
 
-### US Worker (x86_64)
+### Build & deploy
 
 ```bash
-# 1. Copy source
+# 1. Copy source to the worker host
 rsync -avz --exclude '_build' --exclude 'deps' --exclude '.git' \
-  ~/repos/uptrack-app/uptrack-worker/ root@REMOVED_US_WORKER_IP:/opt/uptrack-worker/
+  ./uptrack-worker/ "$WORKER_HOST:/opt/uptrack-worker/"
 
-# 2. Build release on target
-ssh root@REMOVED_US_WORKER_IP "cd /opt/uptrack-worker && \
+# 2. Build the release on the target (architecture must match)
+ssh "$WORKER_HOST" "cd /opt/uptrack-worker && \
   MIX_ENV=prod mix deps.get --only prod && \
   MIX_ENV=prod mix release"
 
-# 3. Deploy and restart
-ssh root@REMOVED_US_WORKER_IP "rm -rf /opt/uptrack-worker-release && \
+# 3. Stage the release and restart
+ssh "$WORKER_HOST" "rm -rf /opt/uptrack-worker-release && \
   cp -r /opt/uptrack-worker/_build/prod/rel/uptrack_worker /opt/uptrack-worker-release && \
   chown -R uptrack-worker:uptrack-worker /opt/uptrack-worker-release && \
   systemctl restart uptrack-worker"
 
 # 4. Verify
-ssh root@REMOVED_US_WORKER_IP "journalctl -u uptrack-worker --since '10 sec ago' --no-pager"
+ssh "$WORKER_HOST" "journalctl -u uptrack-worker --since '10 sec ago' --no-pager"
 ```
 
-### India Worker (ARM64)
+ARM64 workers must build on the target — cross-compilation is not configured.
 
-Same steps, different host:
+## Systemd service env vars
 
-```bash
-# 1. Copy source
-rsync -avz --exclude '_build' --exclude 'deps' --exclude '.git' \
-  ~/repos/uptrack-app/uptrack-worker/ root@REMOVED_ASIA_WORKER_IP:/opt/uptrack-worker/
+Workers run as `uptrack-worker.service`. Required env:
 
-# 2. Build release on target (ARM64 — must build on target)
-ssh root@REMOVED_ASIA_WORKER_IP "cd /opt/uptrack-worker && \
-  MIX_ENV=prod mix deps.get --only prod && \
-  MIX_ENV=prod mix release"
+| Var | Purpose |
+|-----|---------|
+| `NODE_REGION` | Region tag emitted with each check result (`us`, `asia`, `eu`, ...) |
+| `MAIN_NODES` | Comma-separated list of `uptrack@<host>` addresses for libcluster |
+| `RELEASE_COOKIE` | Strong random cookie shared across all cluster nodes |
+| `MIX_ENV` | Always `prod` in deployed environments |
+| `APPSIGNAL_PUSH_API_KEY` | Optional. Enables APM. Leave unset to disable AppSignal |
 
-# 3. Deploy and restart
-ssh root@REMOVED_ASIA_WORKER_IP "rm -rf /opt/uptrack-worker-release && \
-  cp -r /opt/uptrack-worker/_build/prod/rel/uptrack_worker /opt/uptrack-worker-release && \
-  chown -R uptrack-worker:uptrack-worker /opt/uptrack-worker-release && \
-  systemctl restart uptrack-worker"
+## How consensus works
 
-# 4. Verify
-ssh root@REMOVED_ASIA_WORKER_IP "journalctl -u uptrack-worker --since '10 sec ago' --no-pager"
-```
-
-## Systemd Service
-
-Both workers run as `uptrack-worker.service` with these env vars:
-
-| Var | US Worker | India Worker |
-|-----|-----------|-------------|
-| NODE_REGION | us | asia |
-| MAIN_NODES | uptrack@REMOVED_MAIN_TS_IP_1,uptrack@REMOVED_MAIN_TS_IP_2 | same |
-| RELEASE_COOKIE | REMOVED_ERLANG_COOKIE | same |
-| MIX_ENV | prod | prod |
-
-## How Consensus Works
-
-1. Each worker runs MonitorProcess GenServers for all monitors
+1. Each worker runs a `MonitorProcess` GenServer per monitor
 2. Each process performs HTTP checks independently from its region
-3. After each check, result is broadcast via `pg` process group to all nodes
-4. Each node computes consensus: majority down = down, otherwise up
-5. Only the "home node" (hash-based) fires alerts — prevents duplicates
+3. After each check, the result is broadcast via the `:monitor_checks` pg process group to all nodes
+4. Each app node computes consensus: majority down = down, otherwise up
+5. Only the "home node" (deterministic hash of `monitor_id`) fires alerts — prevents duplicate pages
 
 ## Troubleshooting
 
 ```bash
 # Check cluster connectivity
-ssh root@REMOVED_US_WORKER_IP "ping -c 1 REMOVED_MAIN_TS_IP_1"  # US → EU
-ssh root@REMOVED_ASIA_WORKER_IP "ping -c 1 REMOVED_MAIN_TS_IP_1"    # India → EU
+ssh "$WORKER_HOST" "ping -c 1 $MAIN_TAILSCALE_IP"
 
-# Check service logs
-ssh root@REMOVED_US_WORKER_IP "journalctl -u uptrack-worker -f"
-ssh root@REMOVED_ASIA_WORKER_IP "journalctl -u uptrack-worker -f"
+# Stream service logs
+ssh "$WORKER_HOST" "journalctl -u uptrack-worker -f"
 
-# Connect to running node (IEx remote shell)
-ssh root@REMOVED_US_WORKER_IP "/opt/uptrack-worker-release/bin/uptrack_worker remote"
+# Attach an IEx remote shell to a running release
+ssh "$WORKER_HOST" "/opt/uptrack-worker-release/bin/uptrack_worker remote"
 
-# Check cluster membership from main app
-ssh nbg1 "/nix/store/*/bin/uptrack remote"
-# then: Node.list()
+# Check cluster membership from the main app
+ssh "$MAIN_HOST" "/opt/uptrack-release/bin/uptrack remote"
+# then in IEx:
+Node.list()
 ```
 
-## Known Issues
+## Known operational notes
 
-- India: `nixos-rebuild switch` fails on bootloader — use `nixos-rebuild test -I nixos-config=/etc/nixos/configuration.nix`
-- India: `awk: command not found` in stop script (harmless)
-- Workers don't write to DB or trigger alerts — only check + broadcast
+- Workers don't write to Postgres or trigger alerts — they only run checks and broadcast results
+- Some ARM64 hosts have NixOS bootloader quirks; consult provider docs
+- The `uptrack-worker` release is intentionally stateless — restart loses no durable data

@@ -9,6 +9,6 @@ import Config
 config :appsignal, :config,
   otp_app: :uptrack_worker,
   name: "Uptrack Worker",
-  push_api_key: "REMOVED_APPSIGNAL_KEY",
+  push_api_key: System.get_env("APPSIGNAL_PUSH_API_KEY"),
   env: Mix.env(),
   enable_error_backend: true
