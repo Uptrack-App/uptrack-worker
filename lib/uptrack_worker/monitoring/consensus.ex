@@ -26,7 +26,17 @@ defmodule UptrackWorker.Monitoring.Consensus do
   @spec enough_results?(t()) :: boolean()
   def enough_results?(%__MODULE__{} = c) do
     received = map_size(c.region_results)
-    received >= c.expected_regions or (received >= 2 and c.status == :timeout)
+    received >= c.expected_regions or (received >= 1 and c.status == :timeout)
+  end
+
+  @doc """
+  Updates the expected region count. Used by MonitorProcess to keep the
+  count in sync with the current `:pg` membership at the start of each
+  consensus attempt.
+  """
+  @spec set_expected_regions(t(), pos_integer()) :: t()
+  def set_expected_regions(%__MODULE__{} = c, n) when is_integer(n) and n >= 1 do
+    %{c | expected_regions: n}
   end
 
   @spec compute(t()) :: String.t() | nil

@@ -28,8 +28,10 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
     :monitor,
     :interval_ms,
     :consecutive_failures,
+    :soft_retry_ref,
     status: :active,
     checking: false,
+    probe_state: :up,
     consensus: %Consensus{}
   ]
 
@@ -111,14 +113,52 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
 
   # --- Check result + consensus ---
 
+  # Layer 1: Nagios-style SOFT/HARD state machine at the probe.
+  # See `uptrack-api/lib/uptrack/monitoring/monitor_process.ex` for the
+  # mirror implementation. Workers MUST NOT broadcast `:down` to the
+  # pg group until a fast 5 s retry also fails.
   def handle_info({:check_result, result}, state) do
-    consensus = Consensus.add_result(state.consensus, region(), result)
-    broadcast_to_group(state.monitor_id, region(), result)
-    consensus = maybe_start_timer(consensus)
-
-    state = %{state | consensus: consensus, checking: false}
-    {:noreply, try_consensus(state)}
+    state = apply_probe_state(state, result)
+    {:noreply, state}
   end
+
+  # Fast retry scheduled by `apply_probe_state/2` after a SOFT DOWN.
+  # Re-run the check via CheckExecutor and route the new result back
+  # through handle_info so the SOFT/HARD transitions apply uniformly.
+  def handle_info(:soft_retry, %{status: :active, monitor: monitor} = state) do
+    parent = self()
+
+    Task.Supervisor.start_child(UptrackWorker.TaskSupervisor, fn ->
+      result =
+        try do
+          CheckExecutor.execute(monitor)
+        rescue
+          e ->
+            %{
+              monitor_id: monitor.id,
+              status: "down",
+              response_time: 0,
+              checked_at: DateTime.utc_now() |> DateTime.truncate(:second),
+              error_message: "Retry error: #{Exception.message(e)}"
+            }
+        catch
+          kind, reason ->
+            %{
+              monitor_id: monitor.id,
+              status: "down",
+              response_time: 0,
+              checked_at: DateTime.utc_now() |> DateTime.truncate(:second),
+              error_message: "Retry #{kind}: #{inspect(reason)}"
+            }
+        end
+
+      send(parent, {:check_result, result})
+    end)
+
+    {:noreply, %{state | soft_retry_ref: nil}}
+  end
+
+  def handle_info(:soft_retry, state), do: {:noreply, %{state | soft_retry_ref: nil}}
 
   # Receive result from another region via pg
   def handle_info({:region_result, region, result}, state) do
@@ -161,7 +201,15 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
 
   # --- Consensus (tracking only — no DB/alerts) ---
 
+  # Refreshes expected_regions from live :pg membership before each attempt,
+  # mirroring the home-node behaviour so worker-side tracking stays in sync
+  # with cluster topology changes.
   defp try_consensus(state) do
+    consensus =
+      Consensus.set_expected_regions(state.consensus, expected_regions(state.monitor_id))
+
+    state = %{state | consensus: consensus}
+
     if Consensus.enough_results?(state.consensus) do
       result = Consensus.compute(state.consensus)
       cancel_consensus_timer(state.consensus)
@@ -178,6 +226,52 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
     else
       state
     end
+  end
+
+  # --- Layer 1 SOFT/HARD ---
+
+  # First DOWN → SOFT: schedule a 5 s retry, don't broadcast yet.
+  # Second DOWN (retry failed) → HARD: broadcast, feed consensus.
+  # UP from any state → cancel any pending retry, go back to :up, and
+  # broadcast the UP result.
+  defp apply_probe_state(state, %{status: "down"} = result) do
+    case state.probe_state do
+      :up ->
+        ref = Process.send_after(self(), :soft_retry, 5_000)
+
+        %{
+          state
+          | probe_state: :soft_down,
+            soft_retry_ref: ref,
+            checking: false
+        }
+
+      :soft_down ->
+        state = %{state | probe_state: :down, soft_retry_ref: nil}
+        process_confirmed_result(state, result)
+
+      :down ->
+        process_confirmed_result(state, result)
+    end
+  end
+
+  defp apply_probe_state(state, %{status: "up"} = result) do
+    if state.soft_retry_ref, do: Process.cancel_timer(state.soft_retry_ref)
+    state = %{state | probe_state: :up, soft_retry_ref: nil}
+    process_confirmed_result(state, result)
+  end
+
+  defp apply_probe_state(state, _result), do: %{state | checking: false}
+
+  defp process_confirmed_result(state, result) do
+    consensus = Consensus.add_result(state.consensus, region(), result)
+    broadcast_to_group(state.monitor_id, region(), result)
+    consensus = maybe_start_timer(consensus)
+
+    state
+    |> Map.put(:consensus, consensus)
+    |> Map.put(:checking, false)
+    |> try_consensus()
   end
 
   # --- Helpers ---

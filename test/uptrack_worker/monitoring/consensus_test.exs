@@ -51,4 +51,35 @@ defmodule UptrackWorker.Monitoring.ConsensusTest do
     nodes = [:a@host, :b@host, :c@host]
     assert Consensus.home_node?("m1", nodes) == Consensus.home_node?("m1", nodes)
   end
+
+  test "timeout with 1 result resolves (partial-region fallback)" do
+    c =
+      %Consensus{expected_regions: 3}
+      |> Consensus.add_result(:eu, %{status: "up"})
+      |> Consensus.timeout()
+
+    assert Consensus.enough_results?(c)
+  end
+
+  test "timeout with zero results does not resolve" do
+    c = %Consensus{expected_regions: 3} |> Consensus.timeout()
+    refute Consensus.enough_results?(c)
+  end
+
+  describe "set_expected_regions/2" do
+    test "updates the field" do
+      c = Consensus.set_expected_regions(%Consensus{expected_regions: 1}, 5)
+      assert c.expected_regions == 5
+    end
+
+    test "raises on non-integer or zero" do
+      assert_raise FunctionClauseError, fn ->
+        Consensus.set_expected_regions(%Consensus{}, "3")
+      end
+
+      assert_raise FunctionClauseError, fn ->
+        Consensus.set_expected_regions(%Consensus{}, 0)
+      end
+    end
+  end
 end
