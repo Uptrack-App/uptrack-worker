@@ -23,6 +23,11 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
 
   @consensus_timeout_ms 10_000
 
+  # Hibernate the process between checks when the cadence makes the GC cost
+  # negligible. Per add-monitor-process-hibernation openspec: at >=10s
+  # cadence the GC cost rounds to zero; per-process RAM drops 5-10x.
+  @hibernation_min_interval_ms 10_000
+
   defstruct [
     :monitor_id,
     :monitor,
@@ -38,7 +43,13 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
   # --- Client API ---
 
   def start_link(monitor) do
-    GenServer.start_link(__MODULE__, monitor, name: MonitorRegistry.via(monitor.id))
+    GenServer.start_link(__MODULE__, monitor,
+      name: MonitorRegistry.via(monitor.id),
+      # Small initial heap + aggressive full-sweep — paired optimization for
+      # hibernation; without these the post-hibernate heap stays larger than
+      # needed.
+      spawn_opt: [min_heap_size: 233, min_bin_vheap_size: 46, fullsweep_after: 20]
+    )
   end
 
   def update_config(monitor_id, monitor) do
@@ -70,7 +81,7 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
     schedule_check(jitter)
 
     Logger.debug("MonitorProcess started: #{monitor.name} (#{monitor.id}) region=#{region()}")
-    {:ok, state}
+    {:ok, state, hibernate_or_infinity(state)}
   end
 
   # --- Check scheduling ---
@@ -78,12 +89,12 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
   @impl true
   def handle_info(:check, %{status: :paused} = state) do
     schedule_check(state.interval_ms)
-    {:noreply, state}
+    hibernate_reply(state)
   end
 
   def handle_info(:check, %{checking: true} = state) do
     schedule_check(state.interval_ms)
-    {:noreply, state}
+    hibernate_reply(state)
   end
 
   # Fire check — fresh connection per check via CheckExecutor
@@ -119,7 +130,7 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
   # pg group until a fast 5 s retry also fails.
   def handle_info({:check_result, result}, state) do
     state = apply_probe_state(state, result)
-    {:noreply, state}
+    hibernate_reply(state)
   end
 
   # Fast retry scheduled by `apply_probe_state/2` after a SOFT DOWN.
@@ -170,7 +181,7 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
   def handle_info(:consensus_timeout, state) do
     consensus = Consensus.timeout(state.consensus)
     state = %{state | consensus: consensus}
-    {:noreply, try_consensus(state)}
+    hibernate_reply(try_consensus(state))
   end
 
   # Catch-all for unexpected messages (Task :DOWN, etc.)
@@ -298,6 +309,16 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
   defp schedule_check(delay_ms) do
     Process.send_after(self(), :check, delay_ms)
   end
+
+  # Hibernation helpers — return :hibernate when the cadence is long enough
+  # that the GC cost is negligible compared to the per-process RAM saving.
+  # At <10s cadence, hibernation thrashes the heap on every wake; skip it.
+  defp hibernate_reply(state), do: {:noreply, state, hibernate_or_infinity(state)}
+
+  defp hibernate_or_infinity(%{interval_ms: ms}) when ms >= @hibernation_min_interval_ms,
+    do: :hibernate
+
+  defp hibernate_or_infinity(_), do: :infinity
 
   defp expected_regions(monitor_id) do
     case :pg.get_members(:monitor_checks, monitor_id) do
