@@ -24,7 +24,7 @@ defmodule UptrackWorker.Monitoring.MonitorProcess do
   @consensus_timeout_ms 10_000
 
   # Hibernate the process between checks when the cadence makes the GC cost
-  # negligible. Per add-monitor-process-hibernation openspec: at >=10s
+  # negligible. Per 76-add-monitor-process-hibernation openspec: at >=10s
   # cadence the GC cost rounds to zero; per-process RAM drops 5-10x.
   @hibernation_min_interval_ms 10_000
 
