@@ -32,6 +32,9 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
     env:
       AUDIT_ENFORCE: ${{ vars.AUDIT_ENFORCE }}
     steps:
@@ -40,3 +43,21 @@ jobs:
 
       - name: Dependency CVEs (osv-scanner, pinned by SHA-256)
         run: scripts/security-audit.sh
+
+      # Nobody reads a red scheduled run: GitHub emails only the person who last
+      # edited the cron line. One open issue per repo (comment on repeats) puts
+      # the finding where the team looks.
+      - name: Open an issue when the weekly run fails
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Weekly security audit failed"
+          body="The scheduled audit found known vulnerabilities or an end-of-life nixpkgs channel. Run: $RUN_URL. Fix, or acknowledge with a reason and date (docs/SECURITY-DEPENDENCIES.md)."
+          n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --repo "$GITHUB_REPOSITORY" --body "Still failing on $(date -u +%F). $RUN_URL"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi

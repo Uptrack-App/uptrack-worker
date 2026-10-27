@@ -22,6 +22,8 @@ Run it locally (it downloads a pinned osv-scanner and checks its SHA-256):
 scripts/security-audit.sh
 ```
 
+A failed **scheduled** run opens one GitHub issue ("Weekly security audit failed") and comments on it while it keeps failing, so a red Monday does not depend on someone reading the Actions tab. Close the issue when the audit is green.
+
 ## Turning enforcement on
 
 A repo with an open backlog starts in warn-only mode: findings print a warning
