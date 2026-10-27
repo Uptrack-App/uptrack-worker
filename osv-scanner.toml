@@ -17,7 +17,7 @@
 [[IgnoredVulns]]
 id = "EEF-CVE-2026-43966"
 ignoreUntil = 2027-01-20
-reason = "cowlib 2.21.0 (HTTP response splitting via non-VCHAR bytes in cow_http_struct_hd:escape_string/2): no fixed release exists yet. cowlib is pulled in by gun. Check Hex for a newer cowlib by the date."
+reason = "cowlib 2.21.0 (HTTP response splitting via non-VCHAR bytes in cow_http_struct_hd:escape_string/2; GHSA-w4f7-4cxr-rv3c is the same advisory for cowboy and gun): no fixed release exists yet. cowlib comes in through gun. Checked 2026-10-27: config/config.exs sets check_client to CheckClient.Mint, so gun is not the production client (and CheckClient.Gun calls :gun.request/4, which gun 2.7.0 does not export), and Mint 1.11.0 itself rejects non-visible characters in header names and values and validates the request target. CheckClient.RequestGuard additionally rejects CR/LF/NUL before the gun path. Re-check for a cowlib release by the date."
 
 [[IgnoredVulns]]
 id = "EEF-CVE-2026-32686"
