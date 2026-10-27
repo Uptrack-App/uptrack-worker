@@ -1,0 +1,42 @@
+name: Security audit
+
+# Known CVEs in the lockfiles (mix.lock).
+# Runs on every push to main, every pull request (Renovate's too), every
+# Monday 06:00 UTC and by hand. The weekly run matters: new CVEs are published
+# against code that did not change. A red scheduled run does not touch prod;
+# look at the Actions tab on Mondays.
+#
+# Findings fail the job only when the repo variable AUDIT_ENFORCE is "true".
+# Fix by bumping, or acknowledge with a reason and an ignoreUntil date in
+# osv-scanner.toml. Never delete this job to get a change out
+# (docs/SECURITY-DEPENDENCIES.md).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+# A newer push cancels the older pull request run. The event name is in the
+# group so the weekly run never cancels a run on main.
+concurrency:
+  group: audit-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AUDIT_ENFORCE: ${{ vars.AUDIT_ENFORCE }}
+    steps:
+      # Third-party actions are pinned to a commit, not a movable tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Dependency CVEs (osv-scanner, pinned by SHA-256)
+        run: scripts/security-audit.sh

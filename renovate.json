@@ -1,0 +1,60 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Dependency bump PRs (docs/SECURITY-DEPENDENCIES.md). The audit workflow is the gate; this only opens the PRs.",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits"
+  ],
+  "timezone": "UTC",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "minimumReleaseAge": "14 days",
+  "prConcurrentLimit": 6,
+  "automerge": false,
+  "rangeStrategy": "bump",
+  "nix": {
+    "enabled": true
+  },
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": [
+      "security"
+    ],
+    "schedule": [
+      "at any time"
+    ],
+    "minimumReleaseAge": null
+  },
+  "osvVulnerabilityAlerts": true,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "before 6am on the first day of the month"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": "Minor and patch bumps of one ecosystem in one weekly PR. Majors stay separate.",
+      "matchManagers": [
+        "cargo",
+        "npm",
+        "mix",
+        "pub"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "{manager} minor and patch"
+    },
+    {
+      "description": "GitHub Actions stay pinned to a commit digest, grouped.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "github actions",
+      "pinDigests": true
+    }
+  ]
+}
