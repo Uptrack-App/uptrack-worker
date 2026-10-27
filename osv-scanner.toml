@@ -1,0 +1,11 @@
+# osv-scanner acknowledgements (scripts/security-audit.sh, audit workflow).
+#
+# Only for advisories that do not apply to us or have no fixed release yet.
+# Every entry needs a reason and an ignoreUntil at most 90 days ahead; after
+# that date the finding fails again. Fixing is the default: see
+# docs/SECURITY-DEPENDENCIES.md.
+#
+# [[IgnoredVulns]]
+# id = "GHSA-xxxx-xxxx-xxxx"
+# ignoreUntil = 2027-01-15
+# reason = "pkg 1.2.3 is dev-only and the vulnerable function is never called; fixed upstream in 2.0 (major)"
