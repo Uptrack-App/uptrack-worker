@@ -50,10 +50,14 @@ defmodule UptrackWorker.Monitoring.CheckClient.Gun do
     base = [{"user-agent", "Uptrack Monitor/1.0"}, {"accept", "*/*"}]
 
     case Map.get(monitor.settings || %{}, "headers") do
-      nil -> base
+      nil ->
+        base
+
       custom when is_map(custom) ->
         Enum.reduce(custom, base, fn {k, v}, acc -> [{k, v} | acc] end)
-      _ -> base
+
+      _ ->
+        base
     end
   end
 
@@ -132,9 +136,11 @@ defmodule UptrackWorker.Monitoring.CheckClient.Gun do
   end
 
   defp truncate_body(nil), do: nil
+
   defp truncate_body(body) when is_binary(body) and byte_size(body) > 1000 do
     binary_part(body, 0, 1000) <> "... [truncated]"
   end
+
   defp truncate_body(body) when is_binary(body), do: body
   defp truncate_body(_), do: nil
 end
