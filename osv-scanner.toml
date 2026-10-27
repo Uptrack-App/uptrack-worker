@@ -22,7 +22,7 @@ reason = "cowlib 2.21.0 (HTTP response splitting via non-VCHAR bytes in cow_http
 [[IgnoredVulns]]
 id = "GHSA-w4f7-4cxr-rv3c"
 ignoreUntil = 2027-01-20
-reason = "gun 2.7.0 (cowboy/gun HTTP request/response splitting): Hex has no newer gun than 2.7.0 (`mix hex.outdated gun` says up to date) though the advisory lists 2.16.0. APPLIES HERE: check_client/gun.ex build_request/build_headers pass customer-set header names and values and the URL path straight to :gun.request with no CR/LF/NUL check. Impact is a customer splitting requests aimed at their own target host. Fix in our code: reject CR, LF and NUL in header names, values and path before :gun.request. Re-check for a gun release by the date."
+reason = "gun 2.7.0 (cowboy/gun HTTP request/response splitting): exposure closed in our own code. lib/uptrack_worker/monitoring/check_client/request_guard.ex rejects CR, LF and NUL in the request path/query, every header name and every header value, and allowlists the HTTP method, before check_client/gun.ex calls :gun.request. The entry stays only because Hex has no newer gun than 2.7.0 (`mix hex.outdated gun` says up to date) though the advisory lists 2.16.0. Re-check for a gun release by the date."
 
 [[IgnoredVulns]]
 id = "EEF-CVE-2026-32686"
