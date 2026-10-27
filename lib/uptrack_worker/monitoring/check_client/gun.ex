@@ -6,6 +6,7 @@ defmodule UptrackWorker.Monitoring.CheckClient.Gun do
 
   @behaviour UptrackWorker.Monitoring.CheckClient
 
+  alias UptrackWorker.Monitoring.CheckClient.RequestGuard
   alias UptrackWorker.Monitoring.GunConnection
 
   @impl true
@@ -19,10 +20,17 @@ defmodule UptrackWorker.Monitoring.CheckClient.Gun do
   @impl true
   def check(monitor, %GunConnection{} = conn) do
     request = build_request(monitor)
-    start_time = System.monotonic_time(:millisecond)
-    result = execute_request(conn, request, (monitor.timeout || 30) * 1000)
-    response_time = System.monotonic_time(:millisecond) - start_time
-    build_check_attrs(monitor, result, response_time)
+
+    case RequestGuard.validate(request) do
+      :ok ->
+        start_time = System.monotonic_time(:millisecond)
+        result = execute_request(conn, request, (monitor.timeout || 30) * 1000)
+        response_time = System.monotonic_time(:millisecond) - start_time
+        build_check_attrs(monitor, result, response_time)
+
+      {:error, message} ->
+        build_check_attrs(monitor, {:error, message}, 0)
+    end
   end
 
   def check(monitor, _conn) do
@@ -41,7 +49,16 @@ defmodule UptrackWorker.Monitoring.CheckClient.Gun do
     uri = URI.parse(monitor.url)
     path = (uri.path || "/") <> if(uri.query, do: "?#{uri.query}", else: "")
     settings = monitor.settings || %{}
-    method = Map.get(settings, "method", "GET") |> String.downcase() |> String.to_atom()
+    raw_method = Map.get(settings, "method", "GET")
+
+    # Allowlisted atom, never String.to_atom on customer input. An unknown
+    # method stays as the raw value so RequestGuard.validate/1 rejects it.
+    method =
+      case RequestGuard.parse_method(raw_method) do
+        {:ok, atom} -> atom
+        :error -> raw_method
+      end
+
     headers = build_headers(monitor)
     %{method: method, path: path, headers: headers}
   end
@@ -129,7 +146,7 @@ defmodule UptrackWorker.Monitoring.CheckClient.Gun do
   defp method_string(:head), do: "HEAD"
   defp method_string(:delete), do: "DELETE"
   defp method_string(:patch), do: "PATCH"
-  defp method_string(other), do: String.upcase(to_string(other))
+  defp method_string(:options), do: "OPTIONS"
 
   defp normalize_headers(headers) do
     Map.new(headers, fn {k, v} -> {to_string(k), to_string(v)} end)
